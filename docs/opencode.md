@@ -22,12 +22,14 @@ The OpenCode work in this fork is about turning that brittle bridge into a stabl
   - deterministic structured extraction for session facts
   - local cache artifacts under `~/.oracle/opencode-memory/`
   - compact structured memory notes included in the forwarded context
+  - heuristic query-aware retrieval over cached session artifacts
 - `examples/opencode/oracle-config.json5`
   - a starter config snippet
   - raises `maxFileSizeBytes` to 4 MB
   - keeps the active ChatGPT model with `browser.modelStrategy: "current"`
 
 These files are companion artifacts for a local OpenCode install. They are not yet integrated into the published Oracle package surface.
+The source stays split in the repo, but the install step now bundles it into one deployed plugin file for OpenCode.
 
 ## Install
 
@@ -37,6 +39,8 @@ Sync the bridge files into your OpenCode config:
 bun install
 bun run opencode:sync
 ```
+
+The sync step bundles `examples/opencode/oracle-agent.js` plus its local helper modules into a single deployed `~/.config/opencode/plugins/oracle-agent.js` file and removes the stale helper copy.
 
 Then merge the relevant values from `examples/opencode/oracle-config.json5` into `~/.oracle/config.json`.
 
@@ -53,11 +57,13 @@ The OpenCode bridge uses deterministic compaction.
 3. Render older sessions with a more aggressive summary form that removes bulky detail.
 4. Drop the oldest session blocks entirely if the bundle is still over budget.
 5. Add a deterministic structured session-memory layer for files, commands, errors, decisions, constraints, and open questions.
+6. Retrieve older session artifacts into a separate section when they match the current query better than age alone would predict.
 
 The goal is not to produce a beautiful retrospective. The goal is to keep the consult request valid and weighted toward the context most likely to matter for the current turn.
 
 This is not LLM summarization. No extra model call is made to compress old history.
 The structured memory section is also deterministic. It is extracted from the lineage and cached locally for later retrieval work.
+The first retrieval pass is heuristic and query-aware. It ranks cached session artifacts by prompt overlap, file overlap, symbol overlap, decision overlap, and a small recency bonus.
 
 ## Why deterministic compaction first
 
@@ -76,8 +82,10 @@ An LLM summarization layer may still become useful later, but only as an explici
 The bridge plugin supports these environment variables:
 
 - `ORACLE_OPENCODE_MAX_CONTEXT_FILE_BYTES`
+- `ORACLE_OPENCODE_MAX_RETRIEVED_MEMORY_BYTES`
 - `ORACLE_OPENCODE_FULL_TRANSCRIPT_SESSIONS`
 - `ORACLE_OPENCODE_COMPACT_TRANSCRIPT_SESSIONS`
+- `ORACLE_OPENCODE_RETRIEVAL_PROTECTED_SESSIONS`
 - `ORACLE_OPENCODE_MAX_TEXT_CHARS`
 - `ORACLE_OPENCODE_MAX_TOOL_OUTPUT_CHARS`
 - `ORACLE_OPENCODE_MAX_JSON_CHARS`

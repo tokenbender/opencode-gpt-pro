@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { copyFileSync, mkdirSync, readdirSync } from "node:fs"
+import { mkdirSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { build } from "esbuild"
 
 function resolvePluginsDir() {
   const args = process.argv.slice(2)
@@ -20,18 +21,27 @@ function resolvePluginsDir() {
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, "..")
-const sourceDir = path.join(repoRoot, "examples", "opencode")
 const pluginsDir = resolvePluginsDir()
-
-const files = readdirSync(sourceDir)
-  .filter((entry) => entry.endsWith(".js"))
-  .sort()
+const entryPoint = path.join(repoRoot, "examples", "opencode", "oracle-agent.js")
+const outputFile = path.join(pluginsDir, "oracle-agent.js")
 
 mkdirSync(pluginsDir, { recursive: true })
 
-for (const file of files) {
-  copyFileSync(path.join(sourceDir, file), path.join(pluginsDir, file))
-}
+await build({
+  entryPoints: [entryPoint],
+  outfile: outputFile,
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  target: ["node22"],
+  external: ["@opencode-ai/plugin"],
+  sourcemap: false,
+  logLevel: "silent",
+})
 
-process.stdout.write(`Synced ${files.length} OpenCode bridge file(s) to ${pluginsDir}\n`)
+rmSync(path.join(pluginsDir, "oracle-agent-memory.js"), { force: true })
+rmSync(path.join(pluginsDir, "oracle-agent.js.map"), { force: true })
+
+process.stdout.write(`Bundled OpenCode bridge to ${outputFile}\n`)
+process.stdout.write("The repo keeps split source files, but OpenCode now gets a single deployed plugin file.\n")
 process.stdout.write("Oracle config lives in ~/.oracle/config.json; merge changes from examples/opencode/oracle-config.json5 when needed.\n")

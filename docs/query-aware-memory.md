@@ -6,6 +6,7 @@ It assumes the current baseline already exists:
 
 - hard byte budgeting for `opencode-session-context.md`
 - deterministic transcript compaction by recency
+- deterministic structured extraction and cache artifacts under `~/.oracle/opencode-memory/`
 - browser-native GPT Pro execution through Oracle
 
 The purpose of this plan is to make old session context recoverable because it is relevant, not only because it is recent.
@@ -18,7 +19,26 @@ The current bridge behavior lives in `examples/opencode/oracle-agent.js`.
 - `selectTranscriptBlocks(...)` chooses full, compact, or summary blocks by age and byte budget.
 - `buildContextMarkdown(...)` assembles the final attachment and drops oldest blocks if the budget is still exceeded.
 
-That gives the system a reliable first safety layer. It does not yet have a memory layer.
+That gives the system a reliable first safety layer. The repo now also has a deterministic memory layer plus an initial heuristic retrieval pass over cached session artifacts.
+
+## Current implementation status
+
+- Phase 1 is implemented.
+- Phase 2 now exists in a first-pass heuristic form.
+- Phase 3 and later remain planned work.
+
+Current code paths:
+
+- `examples/opencode/oracle-agent-memory.js`
+  - `buildQueryProfile(...)`
+  - `loadCachedSessionArtifacts(...)`
+  - `scoreSessionArtifact(...)`
+  - `selectRetrievedArtifacts(...)`
+  - `renderRetrievedMemorySection(...)`
+- `examples/opencode/oracle-agent.js`
+  - persists cache artifacts
+  - builds query-aware retrieved memory before the transcript section
+  - still falls back to deterministic compaction if retrieval yields nothing useful
 
 ## Problem to solve
 

@@ -1,0 +1,111 @@
+{
+  "worktree": "/repo",
+  "prompt": "Explain why src/oracle/files.ts hit the 1 MB limit and how buildContextMarkdown in examples/opencode/oracle-agent.js should retrieve older relevant sessions.",
+  "attachedFiles": [
+    "/repo/examples/opencode/oracle-agent.js"
+  ],
+  "protectedSessionCount": 1,
+  "sessions": [
+    {
+      "session": {
+        "id": "sess-old-error",
+        "parentID": null,
+        "title": "Attachment failure analysis",
+        "directory": "/repo"
+      },
+      "entries": [
+        {
+          "info": {
+            "id": "msg-old-error-1",
+            "role": "user",
+            "createdAt": "2026-03-27T10:00:00.000Z"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "The root cause is in src/oracle/files.ts. Error: attached Oracle session context exceeded the 1 MB limit. We should preserve maxFileSizeBytes and keep the failure searchable later."
+            },
+            {
+              "type": "patch",
+              "files": [
+                "src/oracle/files.ts"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "session": {
+        "id": "sess-old-irrelevant",
+        "parentID": "sess-old-error",
+        "title": "Marketing pass",
+        "directory": "/repo"
+      },
+      "entries": [
+        {
+          "info": {
+            "id": "msg-old-irrelevant-1",
+            "role": "user",
+            "createdAt": "2026-03-27T11:00:00.000Z"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "Refresh README copy and update docs/bridge.md with lighter product language for the landing page."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "session": {
+        "id": "sess-old-decision",
+        "parentID": "sess-old-irrelevant",
+        "title": "Retrieval design",
+        "directory": "/repo"
+      },
+      "entries": [
+        {
+          "info": {
+            "id": "msg-old-decision-1",
+            "role": "assistant",
+            "createdAt": "2026-03-27T12:00:00.000Z",
+            "providerID": "openai",
+            "modelID": "gpt-5.4",
+            "mode": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "Decision: use buildContextMarkdown plus query-aware retrieval in examples/opencode/oracle-agent.js so older relevant sessions outrank recent chatter."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "session": {
+        "id": "sess-current-protected",
+        "parentID": "sess-old-decision",
+        "title": "Current install work",
+        "directory": "/repo"
+      },
+      "entries": [
+        {
+          "info": {
+            "id": "msg-current-1",
+            "role": "user",
+            "createdAt": "2026-03-27T13:00:00.000Z"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "Current work is on scripts/install-opencode-bridge.js and local sync behavior. Keep this in working memory, not retrieved memory."
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

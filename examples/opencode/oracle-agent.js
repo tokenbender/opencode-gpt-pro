@@ -5,9 +5,14 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import {
+  buildQueryProfile,
   buildStructuredMemorySection,
+  loadCachedSessionArtifacts,
   makeSessionArtifact,
+  mergeSessionArtifacts,
   persistSessionArtifacts,
+  renderRetrievedMemorySection,
+  selectRetrievedArtifacts,
 } from "./oracle-agent-memory.js"
 
 function parsePositiveInt(value, fallback) {
@@ -19,6 +24,10 @@ const MAX_TEXT_CHARS = parsePositiveInt(process.env.ORACLE_OPENCODE_MAX_TEXT_CHA
 const MAX_TOOL_OUTPUT_CHARS = parsePositiveInt(process.env.ORACLE_OPENCODE_MAX_TOOL_OUTPUT_CHARS, 12000)
 const MAX_JSON_CHARS = parsePositiveInt(process.env.ORACLE_OPENCODE_MAX_JSON_CHARS, 4000)
 const MAX_CONTEXT_FILE_BYTES = parsePositiveInt(process.env.ORACLE_OPENCODE_MAX_CONTEXT_FILE_BYTES, 900 * 1024)
+const MAX_RETRIEVED_MEMORY_BYTES = parsePositiveInt(
+  process.env.ORACLE_OPENCODE_MAX_RETRIEVED_MEMORY_BYTES,
+  Math.max(24 * 1024, Math.floor(MAX_CONTEXT_FILE_BYTES * 0.25)),
+)
 const FULL_TRANSCRIPT_SESSION_COUNT = parsePositiveInt(
   process.env.ORACLE_OPENCODE_FULL_TRANSCRIPT_SESSIONS,
   1,
@@ -26,6 +35,10 @@ const FULL_TRANSCRIPT_SESSION_COUNT = parsePositiveInt(
 const COMPACT_TRANSCRIPT_SESSION_COUNT = parsePositiveInt(
   process.env.ORACLE_OPENCODE_COMPACT_TRANSCRIPT_SESSIONS,
   2,
+)
+const RETRIEVAL_PROTECTED_SESSION_COUNT = parsePositiveInt(
+  process.env.ORACLE_OPENCODE_RETRIEVAL_PROTECTED_SESSIONS,
+  FULL_TRANSCRIPT_SESSION_COUNT + COMPACT_TRANSCRIPT_SESSION_COUNT,
 )
 
 const COMPACT_MESSAGE_RENDER_OPTIONS = {
@@ -428,7 +441,15 @@ async function runOracle(binary, args, cwd, abortSignal, env = process.env) {
   })
 }
 
-function buildContextMarkdown({ args, context, lineage, lineageMessages, attachedFiles, sessionArtifacts }) {
+function buildContextMarkdown({
+  args,
+  context,
+  lineage,
+  lineageMessages,
+  attachedFiles,
+  sessionArtifacts,
+  retrievedArtifacts,
+}) {
   const sections = []
   sections.push("# OpenCode Oracle Bridge Context")
   sections.push("")
@@ -452,6 +473,7 @@ function buildContextMarkdown({ args, context, lineage, lineageMessages, attache
   }
   sections.push("")
   sections.push(...buildStructuredMemorySection(sessionArtifacts))
+  sections.push(...renderRetrievedMemorySection(retrievedArtifacts))
   sections.push("## Guidance for Oracle")
   sections.push("- Treat this file as the authoritative OpenCode transcript/history bundle.")
   sections.push("- Use the separately attached project files as source of truth for current code and artifacts.")
@@ -459,6 +481,7 @@ function buildContextMarkdown({ args, context, lineage, lineageMessages, attache
   sections.push("- Use the conversation/tool history below when forming your answer.")
   sections.push("- Older sessions may be compacted or omitted to keep this attachment within the size budget.")
   sections.push("- The structured session memory section is a deterministic extraction layer, not an LLM-generated summary.")
+  sections.push("- Retrieved session memory is a query-aware selection over cached session artifacts, not raw transcript replay.")
   sections.push("")
 
   const transcriptBaseSections = [...sections, "## Session transcript", ""]
@@ -544,15 +567,40 @@ async function OracleAgentPlugin({ client }) {
             }),
           )
           let memoryCache = null
+          let cachedSessionArtifacts = []
           try {
             memoryCache = persistSessionArtifacts({
               oracleHomeDir,
               worktree: context.worktree ?? context.directory,
               sessionArtifacts,
             })
+            cachedSessionArtifacts = loadCachedSessionArtifacts({
+              oracleHomeDir,
+              worktree: context.worktree ?? context.directory,
+            })
           } catch {
             memoryCache = null
+            cachedSessionArtifacts = []
           }
+          const mergedSessionArtifacts = mergeSessionArtifacts({
+            liveSessionArtifacts: sessionArtifacts,
+            cachedSessionArtifacts,
+          })
+          const queryProfile = buildQueryProfile({
+            prompt: args.prompt,
+            attachedFiles: [...autoFiles, ...manualFiles],
+            recentArtifacts: sessionArtifacts.slice(-2),
+            worktree: context.worktree,
+          })
+          const protectedSessionIds = new Set(
+            sessionArtifacts.slice(-RETRIEVAL_PROTECTED_SESSION_COUNT).map((artifact) => artifact.sessionId),
+          )
+          const retrieval = selectRetrievedArtifacts({
+            sessionArtifacts: mergedSessionArtifacts,
+            queryProfile,
+            protectedSessionIds,
+            maxBytes: MAX_RETRIEVED_MEMORY_BYTES,
+          })
           const tempDir = mkdtempSync(path.join(os.tmpdir(), "opencode-oracle-"))
           const contextFile = path.join(tempDir, "opencode-session-context.md")
           const outputFile = path.join(tempDir, "oracle-output.txt")
@@ -563,6 +611,7 @@ async function OracleAgentPlugin({ client }) {
             lineageMessages,
             attachedFiles: autoFiles,
             sessionArtifacts,
+            retrievedArtifacts: retrieval.items,
           })
 
           writeFileSync(contextFile, contextMarkdown)
@@ -604,6 +653,9 @@ async function OracleAgentPlugin({ client }) {
               manualFiles,
               memoryCacheDir: memoryCache?.cacheDir,
               memorySessions: sessionArtifacts.length,
+              retrievalCandidates: mergedSessionArtifacts.length,
+              retrievedMemorySessions: retrieval.items.map((item) => item.artifact.sessionId),
+              retrievalKeywords: queryProfile.keywords,
             },
           })
 

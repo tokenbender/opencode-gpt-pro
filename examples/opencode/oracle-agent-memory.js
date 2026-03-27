@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -121,6 +121,46 @@ const FILE_EXTENSIONS = new Set([
   "yaml",
   "yml",
 ])
+const KEYWORD_STOP_WORDS = new Set([
+  ...SYMBOL_STOP_WORDS,
+  "into",
+  "from",
+  "this",
+  "that",
+  "these",
+  "those",
+  "them",
+  "then",
+  "than",
+  "the",
+  "and",
+  "why",
+  "how",
+  "for",
+  "not",
+  "when",
+  "what",
+  "where",
+  "which",
+  "while",
+  "should",
+  "would",
+  "could",
+  "there",
+  "their",
+  "about",
+  "because",
+  "through",
+  "under",
+  "over",
+  "have",
+  "with",
+  "without",
+])
+const DEFAULT_QUERY_KEYWORD_LIMIT = 24
+const DEFAULT_RETRIEVAL_MIN_SCORE = 2.5
+const MAX_RETRIEVED_EXCERPT_CHARS = 280
+const MAX_RETRIEVED_MATCHES = 4
 
 function normalizeText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim()
@@ -129,6 +169,10 @@ function normalizeText(value) {
 function truncateText(text, max) {
   if (!text || text.length <= max) return text
   return text.slice(0, max)
+}
+
+function byteLength(text) {
+  return Buffer.byteLength(text ?? "", "utf8")
 }
 
 function stableHash(value) {
@@ -254,6 +298,62 @@ function addSearchFragment(fragments, text) {
   const normalized = normalizeText(text)
   if (!normalized) return
   fragments.push(truncateText(normalized, 600))
+}
+
+function tokenizeKeywords(text, maxItems = DEFAULT_QUERY_KEYWORD_LIMIT) {
+  const tokens = String(text ?? "").match(/[A-Za-z0-9_./-]{3,}/g) ?? []
+  const keywords = []
+  const seen = new Set()
+  for (const token of tokens) {
+    const normalized = token.replace(/^[-_.\/]+|[-_.\/]+$/g, "").toLowerCase()
+    if (!normalized || normalized.length < 3 || /^\d+$/.test(normalized)) continue
+    if (KEYWORD_STOP_WORDS.has(normalized)) continue
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    keywords.push(normalized)
+    if (keywords.length >= maxItems) break
+  }
+  return keywords
+}
+
+function lowerCaseSet(values) {
+  return new Set((values ?? []).map((value) => normalizeText(value).toLowerCase()).filter(Boolean))
+}
+
+function countIntersection(left, right) {
+  if (!left?.length || !right?.length) return 0
+  const leftSet = lowerCaseSet(left)
+  const rightSet = lowerCaseSet(right)
+  let count = 0
+  for (const value of leftSet) {
+    if (rightSet.has(value)) count += 1
+  }
+  return count
+}
+
+function collectBasenames(filePaths, maxItems = 32) {
+  const basenames = []
+  const seen = new Set()
+  for (const filePath of filePaths ?? []) {
+    const cleaned = cleanPathCandidate(filePath)
+    if (!cleaned) continue
+    addUnique(basenames, seen, path.basename(cleaned).replace(/\.[^.]+$/, ""), maxItems)
+    if (basenames.length >= maxItems) break
+  }
+  return basenames
+}
+
+function formatScore(score) {
+  return Number(score).toFixed(1).replace(/\.0$/, "")
+}
+
+function compareArtifactsByRecency(left, right) {
+  const leftKey = normalizeText(left?.timestampRange?.end || left?.timestampRange?.start || "")
+  const rightKey = normalizeText(right?.timestampRange?.end || right?.timestampRange?.start || "")
+  if (leftKey && rightKey && leftKey !== rightKey) {
+    return leftKey.localeCompare(rightKey)
+  }
+  return String(left?.sessionId ?? "").localeCompare(String(right?.sessionId ?? ""))
 }
 
 function addStructuredSignals(bucket, text) {
@@ -447,6 +547,7 @@ function makeSessionArtifact({ session, entries, worktree }) {
     constraints,
     openQuestions,
     searchText,
+    keywords: tokenizeKeywords(searchText, 96),
   }
 
   return {
@@ -496,6 +597,223 @@ function buildStructuredMemorySection(sessionArtifacts) {
   if (openQuestions.length) lines.push(`- Open questions: ${formatList(openQuestions, 4)}`)
   lines.push("")
 
+  return lines
+}
+
+function buildQueryProfile({ prompt, attachedFiles = [], recentArtifacts = [], worktree }) {
+  const files = []
+  const fileSeen = new Set()
+  const symbols = []
+  const symbolSeen = new Set()
+  addPathCandidatesFromText(files, fileSeen, symbols, symbolSeen, prompt, worktree)
+  addSymbolsFromText(symbols, symbolSeen, prompt, 32)
+
+  for (const file of attachedFiles) {
+    addPath(files, fileSeen, file, worktree, 32)
+    addSymbolsFromPath(symbols, symbolSeen, file, 32)
+  }
+
+  const recentFiles = collectRecentUnique(recentArtifacts, "files", 16)
+  const recentSymbols = collectRecentUnique(recentArtifacts, "symbols", 16)
+  const recentErrors = collectRecentUnique(recentArtifacts, "errors", 8)
+  const recentDecisions = collectRecentUnique(recentArtifacts, "decisions", 8)
+  const recentConstraints = collectRecentUnique(recentArtifacts, "constraints", 8)
+
+  const keywords = tokenizeKeywords(
+    [prompt, ...files, ...symbols, ...collectBasenames(files, 16)].join("\n"),
+    DEFAULT_QUERY_KEYWORD_LIMIT,
+  )
+
+  return {
+    prompt: normalizeText(prompt),
+    keywords,
+    files,
+    basenames: collectBasenames(files, 16),
+    symbols,
+    recentFiles,
+    recentBasenames: collectBasenames(recentFiles, 16),
+    recentSymbols,
+    errorKeywords: tokenizeKeywords(recentErrors.join("\n"), 16),
+    decisionKeywords: tokenizeKeywords([...recentDecisions, ...recentConstraints].join("\n"), 16),
+  }
+}
+
+function loadCachedSessionArtifacts({ oracleHomeDir, worktree }) {
+  const sessionsDir = path.join(getWorktreeCacheDir(oracleHomeDir, worktree), "sessions")
+  if (!existsSync(sessionsDir)) return []
+
+  const artifacts = []
+  for (const entry of readdirSync(sessionsDir).sort()) {
+    if (!entry.endsWith(".json")) continue
+    const filePath = path.join(sessionsDir, entry)
+    const artifact = readJsonIfExists(filePath)
+    if (!artifact?.sessionId) continue
+    let cacheMtimeMs = 0
+    try {
+      cacheMtimeMs = statSync(filePath).mtimeMs
+    } catch {
+      cacheMtimeMs = 0
+    }
+    artifacts.push({ ...artifact, cacheMtimeMs })
+  }
+
+  return artifacts
+    .sort((left, right) => {
+      const recency = compareArtifactsByRecency(left, right)
+      if (recency !== 0) return recency
+      return Number(left.cacheMtimeMs ?? 0) - Number(right.cacheMtimeMs ?? 0)
+    })
+    .map(({ cacheMtimeMs: _cacheMtimeMs, ...artifact }) => artifact)
+}
+
+function mergeSessionArtifacts({ liveSessionArtifacts = [], cachedSessionArtifacts = [] }) {
+  const merged = new Map()
+  for (const artifact of cachedSessionArtifacts) {
+    if (artifact?.sessionId) merged.set(artifact.sessionId, artifact)
+  }
+  for (const artifact of liveSessionArtifacts) {
+    if (artifact?.sessionId) merged.set(artifact.sessionId, artifact)
+  }
+  return [...merged.values()].sort(compareArtifactsByRecency)
+}
+
+function buildRetrievedExcerpt(artifact) {
+  const preferred = [
+    ...(artifact.decisions ?? []),
+    ...(artifact.constraints ?? []),
+    ...(artifact.errors ?? []),
+    ...(artifact.openQuestions ?? []),
+    artifact.searchText,
+  ]
+    .map((value) => normalizeText(value))
+    .find(Boolean)
+  return truncateText(preferred ?? "", MAX_RETRIEVED_EXCERPT_CHARS)
+}
+
+function buildMatchReasons(breakdown) {
+  const reasons = []
+  if (breakdown.exactPathOverlap > 0) reasons.push(`exact paths x${breakdown.exactPathOverlap}`)
+  if (breakdown.basenameOverlap > 0) reasons.push(`basenames x${breakdown.basenameOverlap}`)
+  if (breakdown.symbolOverlap > 0) reasons.push(`symbols x${breakdown.symbolOverlap}`)
+  if (breakdown.keywordOverlap > 0) reasons.push(`keywords x${breakdown.keywordOverlap}`)
+  if (breakdown.recentFileOverlap > 0) reasons.push(`recent files x${breakdown.recentFileOverlap}`)
+  if (breakdown.errorOverlap > 0) reasons.push(`errors x${breakdown.errorOverlap}`)
+  if (breakdown.decisionOverlap > 0) reasons.push(`decisions x${breakdown.decisionOverlap}`)
+  return reasons.slice(0, MAX_RETRIEVED_MATCHES)
+}
+
+function scoreSessionArtifact({ artifact, queryProfile, recencyRank = 0, candidateCount = 1 }) {
+  const artifactFiles = artifact.files ?? []
+  const artifactBasenames = collectBasenames(artifactFiles, 32)
+  const artifactKeywords = artifact.keywords?.length ? artifact.keywords : tokenizeKeywords(artifact.searchText, 96)
+  const artifactDecisionKeywords = tokenizeKeywords(
+    [...(artifact.decisions ?? []), ...(artifact.constraints ?? []), ...(artifact.openQuestions ?? [])].join("\n"),
+    48,
+  )
+  const artifactErrorKeywords = tokenizeKeywords([...(artifact.errors ?? []), artifact.searchText].join("\n"), 48)
+
+  const breakdown = {
+    exactPathOverlap: countIntersection(artifactFiles, queryProfile.files),
+    basenameOverlap: countIntersection(artifactBasenames, queryProfile.basenames),
+    symbolOverlap: countIntersection(artifact.symbols ?? [], queryProfile.symbols),
+    keywordOverlap: countIntersection(artifactKeywords, queryProfile.keywords),
+    recentFileOverlap:
+      countIntersection(artifactFiles, queryProfile.recentFiles) +
+      countIntersection(artifactBasenames, queryProfile.recentBasenames),
+    errorOverlap: countIntersection(artifactErrorKeywords, queryProfile.errorKeywords),
+    decisionOverlap: countIntersection(artifactDecisionKeywords, queryProfile.decisionKeywords),
+    recencyBonus: candidateCount > 1 ? recencyRank / (candidateCount - 1) : 1,
+  }
+
+  const nonRecencyScore =
+    5.0 * breakdown.exactPathOverlap +
+    3.0 * breakdown.basenameOverlap +
+    3.0 * breakdown.symbolOverlap +
+    2.5 * breakdown.keywordOverlap +
+    2.0 * breakdown.recentFileOverlap +
+    1.5 * breakdown.errorOverlap +
+    1.0 * breakdown.decisionOverlap
+
+  const totalScore = nonRecencyScore + 0.5 * breakdown.recencyBonus
+
+  return {
+    artifact,
+    score: totalScore,
+    nonRecencyScore,
+    breakdown,
+    excerpt: buildRetrievedExcerpt(artifact),
+    matches: buildMatchReasons(breakdown),
+  }
+}
+
+function renderRetrievedArtifactEntry(item, compact = false) {
+  const lines = []
+  lines.push(`### Session ${item.artifact.sessionId} (score ${formatScore(item.score)})`)
+  if (item.matches.length) lines.push(`- Matched on: ${item.matches.join(", ")}`)
+  if (item.artifact.files?.length) lines.push(`- Files: ${formatList(item.artifact.files, compact ? 3 : 5)}`)
+  if (item.artifact.decisions?.length) lines.push(`- Decisions: ${formatList(item.artifact.decisions, compact ? 2 : 3)}`)
+  if (item.artifact.constraints?.length) lines.push(`- Constraints: ${formatList(item.artifact.constraints, compact ? 2 : 3)}`)
+  if (item.artifact.errors?.length) lines.push(`- Errors: ${formatList(item.artifact.errors, compact ? 1 : 2)}`)
+  if (!compact && item.excerpt) lines.push(`- Excerpt: ${item.excerpt}`)
+  lines.push("")
+  return `${lines.join("\n")}\n`
+}
+
+function selectRetrievedArtifacts({
+  sessionArtifacts = [],
+  queryProfile,
+  protectedSessionIds = new Set(),
+  maxBytes,
+  minScore = DEFAULT_RETRIEVAL_MIN_SCORE,
+}) {
+  const candidates = sessionArtifacts.filter(
+    (artifact) => artifact?.sessionId && !protectedSessionIds.has(artifact.sessionId),
+  )
+  const scored = candidates
+    .map((artifact, index) =>
+      scoreSessionArtifact({
+        artifact,
+        queryProfile,
+        recencyRank: index,
+        candidateCount: candidates.length,
+      }),
+    )
+    .filter((item) => item.nonRecencyScore > 0 && item.score >= minScore)
+    .sort((left, right) => right.score - left.score || compareArtifactsByRecency(right.artifact, left.artifact))
+
+  const items = []
+  let usedBytes = 0
+
+  for (const item of scored) {
+    const fullText = renderRetrievedArtifactEntry(item)
+    const compactText = renderRetrievedArtifactEntry(item, true)
+    const fullBytes = byteLength(fullText)
+    const compactBytes = byteLength(compactText)
+
+    if (usedBytes + fullBytes <= maxBytes) {
+      items.push({ ...item, text: fullText, bytes: fullBytes, compact: false })
+      usedBytes += fullBytes
+      continue
+    }
+
+    if (usedBytes + compactBytes <= maxBytes) {
+      items.push({ ...item, text: compactText, bytes: compactBytes, compact: true })
+      usedBytes += compactBytes
+    }
+  }
+
+  return { items, scored, usedBytes }
+}
+
+function renderRetrievedMemorySection(retrievedArtifacts) {
+  if (!retrievedArtifacts?.length) return []
+  const lines = []
+  lines.push("## Retrieved session memory")
+  lines.push("- Selected because these older artifacts match the current query more strongly than age alone would suggest.")
+  lines.push("")
+  for (const item of retrievedArtifacts) {
+    lines.push(item.text.trimEnd())
+  }
   return lines
 }
 
@@ -573,8 +891,15 @@ function persistSessionArtifacts({ oracleHomeDir, worktree, sessionArtifacts }) 
 
 export {
   MEMORY_SCHEMA_VERSION,
+  buildQueryProfile,
+  byteLength,
   buildStructuredMemorySection,
   getWorktreeCacheDir,
+  loadCachedSessionArtifacts,
   makeSessionArtifact,
+  mergeSessionArtifacts,
   persistSessionArtifacts,
+  renderRetrievedMemorySection,
+  scoreSessionArtifact,
+  selectRetrievedArtifacts,
 }

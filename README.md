@@ -40,6 +40,8 @@ bun install
 bun run opencode:sync
 ```
 
+`bun run opencode:sync` bundles the split OpenCode bridge source into a single deployed `oracle-agent.js` file inside `~/.config/opencode/plugins/`.
+
 Then merge the recommended settings from `examples/opencode/oracle-config.json5` into `~/.oracle/config.json`.
 
 At minimum, this fork currently expects:
