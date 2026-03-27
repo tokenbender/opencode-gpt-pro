@@ -113,6 +113,10 @@ Engine auto-picks API when `OPENAI_API_KEY` is set, otherwise browser; browser i
   - `cp -R skills/oracle ~/.codex/skills/oracle`
 - Then reference it in your `AGENTS.md`/`CLAUDE.md` so Codex loads it.
 
+**OpenCode**
+
+- This fork also carries a fork-local OpenCode bridge customization under `examples/opencode/`; see `docs/opencode.md`.
+
 **MCP**
 
 - Run the stdio server via `oracle-mcp`.

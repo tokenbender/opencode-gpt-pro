@@ -1,0 +1,6 @@
+{
+  maxFileSizeBytes: 4194304,
+  browser: {
+    modelStrategy: "current",
+  },
+}
